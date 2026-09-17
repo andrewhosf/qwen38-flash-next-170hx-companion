@@ -15,8 +15,11 @@ GPU_UTIL=0.90
 # Speculative decoding: 0 = off. Set 4 to enable MTP via the draft above (unvalidated in
 # this companion; 4 is the QSA ring-buffer cap).
 SPEC_TOKENS=0
-# Expert parallel is off (the original repo's tp mode ran plain TP=2).
-EP=0
+# RECOMMENDED ON: expert parallel + humming MoE backend measured 2.1-2.5x decode
+# on 2x CMP 170HX (70.5/94.5/94.3 vs 33.7/43.1/37.4 t/s @8K/22K/100K; prefill
+# ~3630 vs ~1650). Keep EP=0 only for bring-up debugging. See results/ep-humming-campaign.md.
+EP=1
+MOE_BACKEND=humming
 ALLOW_LONG=1
 # Set YARN=1 to apply the YaRN f4 overrides (for >262K context experiments).
 YARN=0

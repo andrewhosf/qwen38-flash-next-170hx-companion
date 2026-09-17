@@ -47,6 +47,11 @@ hardware. This compact INT4 draft accepts less than the reference BF16/optimized
 
 ## Caveats — compare like-for-like
 
+- **SUPERSEDED (2026-09-17):** the "likely headroom from expert-parallel" note below is
+  now measured — `EP=1 + --moe-backend humming` gives decode 70.5/94.5/94.3 t/s
+  (@8K/22K/100K) and prefill ~3,630 t/s on this same box. See
+  [`ep-humming-campaign.md`](ep-humming-campaign.md); that config is the recommended one.
+
 - **Parallel mode matters.** The original repo's headline (prefill 5,500–6,100 t/s;
   decode 60–112 t/s) is **PP=2 + spec=4**, requiring three unpublished PP patches (see
   `docs/drift-log.md` § D6). This run is its `tp` fallback mode: prefill ≈ 1.6–1.7K t/s.

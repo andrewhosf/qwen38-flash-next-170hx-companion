@@ -22,7 +22,12 @@ dead-reproducible install path, so the next person doesn't have to rediscover th
 | `scripts/` | Download (resumable + SHA256), launcher `run.sh`, systemd unit, bench + smoke clients, PLE-structure verifier. |
 | `results/` | Measured benchmarks on 2× CMP 170HX (see `results/benchmarks.md`). |
 
-## TL;DR status quo (2026-09-16)
+## TL;DR status quo (2026-09-17)
+
+- **Run `EP=1` + `MOE_BACKEND=humming` (TP=2)** — measured 2.1–2.5× decode vs plain
+  TP=2 on 2× CMP 170HX (94.5 t/s @22K vs 43.1; prefill ~3,630 vs ~1,650). Requires the
+  `LD_LIBRARY_PATH` cu13 export in the launcher (drift-log D10). See
+  [`results/ep-humming-campaign.md`](results/ep-humming-campaign.md).
 
 - Upstream vLLM (0.29.0) **hard-blocks PP>1** for Qwen4Exp PLE (`NotImplementedError: ... pipeline_parallel_size=1 ...`). The original repo's PP=2 + MTP works only with three PP patches that were **never published**.
 - Therefore: run the original repo's **`tp` mode** (TP=2). This companion ships a working `tp` config; PP remains future work unless those patches surface.

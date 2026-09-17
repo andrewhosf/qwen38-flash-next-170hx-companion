@@ -179,6 +179,55 @@ With these, two full reboot drills passed (first gated boot, `restarts=0`, smoke
 
 ---
 
+## D10 — humming MoE JIT can't find libnvrtc-builtins (worker dies at first MoE shape)
+
+**Symptom:** with `--moe-backend humming`, the engine loads fine, then at the first
+inference shape the worker dies:
+
+```
+nvrtc: error: failed to open libnvrtc-builtins.so.13.0.
+nvrtc_compile: compile failed: NVRTC_ERROR_BUILTIN_OPERATION_FAILURE
+ERROR ... WorkerProc failed to start.
+```
+
+**Cause:** humming JIT-compiles its kernels with NVRTC at runtime. Setting `CUDA_HOME`/
+`PATH` to the venv-bundled CUDA (D7) covers `nvcc`, but the worker process resolves
+`libnvrtc-builtins.so.13.0` through the **dynamic linker**, which only searches the
+system paths (finds the 12.0 builtins, wants 13.0). The file is present at
+`site-packages/nvidia/cu13/lib/` but nothing points the linker there.
+
+**Fix (in the launcher, next to the CUDA_HOME export):**
+
+```bash
+export LD_LIBRARY_PATH="$VENV_CUDA/lib:${LD_LIBRARY_PATH:-}"
+```
+
+(Already in `scripts/run.sh`. Failure mode is unfriendly: the lane crash-loops with
+what looks like a model error — check for the nvrtc line before debugging anything else.)
+
+---
+
+## D11 — `use_local_argmax_reduction: true` crashes released vLLM (works in the pinned dev build)
+
+**Symptom:** adding `"use_local_argmax_reduction": true` to the speculative-config
+(the published `serve-container.sh` in the checkpoint's runtime snapshot sets it)
+fails at model load on pip vLLM 0.29.0:
+
+```
+ValueError: use_local_argmax_reduction is enabled but draft model
+Qwen4ExpMTP does not implement get_top_tokens().
+```
+
+**Cause:** the checkpoint's runtime snapshot was assembled inside container image
+`vllm/vllm-openai:qwen38-flash-next@sha256:fc120e...` running `vllm 0.1.dev20073+g8e685d198`
+— a dev build where the Qwen4ExpMTP drafter implements `get_top_tokens()`. Released
+0.29.0 does not. The flag is a dev-build feature, not a 0.29.0 knob.
+
+**Fix:** omit it. (MTP drafting still works without it; measured decode is unaffected
+when it's omitted — the winning arm-4 config does not use it.)
+
+---
+
 If you hit a drift we haven't listed, the most reliable debugging move is: diff the
 applied file against `bluespace3/qwen38-flash-next-170hx`'s `patches/ple_layer.patched.py`
 (their reference), and treat "reference has it, applied doesn't" as a missing hunk.

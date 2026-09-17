@@ -20,6 +20,10 @@ VENV_CUDA=${FIN_VENV_CUDA:-$(dirname "$VENV")/lib/python3.12/site-packages/nvidi
 if [ -x "$VENV_CUDA/bin/nvcc" ]; then
   export CUDA_HOME="$VENV_CUDA"
   export PATH="$VENV_CUDA/bin:$PATH"
+  # humming MoE JIT (NVRTC) needs libnvrtc-builtins.so.13.0 at WORKER runtime, not
+  # just at build time. Without this the worker dies at the first MoE shape with
+  # NVRTC_ERROR_BUILTIN_OPERATION_FAILURE (see docs/drift-log.md § D10).
+  export LD_LIBRARY_PATH="$VENV_CUDA/lib:${LD_LIBRARY_PATH:-}"
 fi
 # Our sampler kernels failed the CCCL header check; the native sampler is fine.
 export VLLM_USE_FLASHINFER_SAMPLER=0
@@ -78,6 +82,7 @@ case "$MODE" in
     if [ "${EP:-0}" = "1" ]; then
       ARGS+=(--enable-expert-parallel --all2all-backend "${ALL2ALL:-allgather_reducescatter}")
     fi
+    if [ -n "${MOE_BACKEND:-}" ]; then ARGS+=(--moe-backend "$MOE_BACKEND"); fi
     ;;
   pp)
     ARGS+=(--pipeline-parallel-size 2)
