@@ -11,6 +11,7 @@ Wants=network-online.target
 Type=simple
 User=flashnext
 Group=flashnext
+WorkingDirectory=/opt/flashnext
 Environment=FIN_CONF=/etc/flashnext-serving.conf
 ExecStart=/opt/flashnext/run.sh
 Restart=always

@@ -118,3 +118,36 @@ python scripts/bench-flashnext.py                                            # 8
 ```
 
 See `results/benchmarks.md` for what we measured on 2× CMP 170HX.
+
+## 7. Client compatibility & reboot (learned the hard way)
+
+- **Multiple system messages:** the stock Qwen4Exp chat template 400s on any system
+  message after the first — agents that send `[system, system, user]` (Hermes does)
+  need the merge patch: `scripts/patch_chat_template.py <model_dir>/chat_template.jinja`
+  followed by a server restart.
+- **reasoning_effort:** accepted values are `xhigh` (default), `medium`, `low` —
+  `high` → 400. Match client settings.
+- **Reboot-safe:** with the unit systemd-enabled the lane returns on its own — and since
+  2026-09-16 it survives the *first* start after boot too, via a boot gate (§8). Two
+  reboot drills passed. Ensure no other GPU-owning units are enabled on the box.
+
+## 8. Optional: NVMe storage tier + boot gate (measured 2026-09-16)
+
+Both optional, both verified. Moving the checkpoint to NVMe (old path kept as a symlink,
+so no config changes) shaved the PLE prewarm 3.3×:
+
+| Phase | SATA (860 QVO) | NVMe (990 EVO Plus) |
+|---|---|---|
+| PLE prewarm (47.68 GiB) | 100 s | **30 s** cold / 27 s warm |
+| Launch → `/health` 200 | ~6:05 | ~3:55 |
+| Reboot → healthy (incl. boot + gate park) | 16:00 | **13:45** |
+
+The weights phase (~2 min for 69 GB) barely moved — it is CPU/pipeline-bound, not
+disk-bound. NVMe measured 2.7 GB/s single-stream, ~5.5 GB/s at 4 streams (O_DIRECT).
+
+**Boot gate:** on this class of box the first ~7 min after boot can be hostile to
+spawned workers (see `docs/drift-log.md` D9 — a `/dev/shm` semaphore race).
+`scripts/run.sh` waits until uptime ≥ `BOOT_GATE_SECONDS` (default 480) AND a CUDA probe
+passes on the target devices before launching vLLM; mid-day restarts skip it instantly.
+`SKIP_BOOT_GATE=1` bypasses entirely. Complement with `loginctl enable-linger <user>` and
+`RemoveIPC=no` in `/etc/systemd/logind.conf`.

@@ -132,6 +132,53 @@ export VLLM_USE_FLASHINFER_SAMPLER=0   # if the sampler kernels still fail their
 
 ---
 
+## D8 — client payloads with multiple system messages → 400
+
+**Symptom:** a client gets `400` with `"System message must be at the beginning."` on
+every call (e.g. Hermes-style agents that send `[system, system, user]`).
+
+**Cause:** the checkpoint's `chat_template.jinja` renders only `messages[0]` as system
+and raises on any other system message. llama.cpp (a common previous lane) is lenient
+about this; vLLM's stock template is not.
+
+**Fix:** merge all LEADING system messages into one system block —
+`scripts/patch_chat_template.py <model_dir>/chat_template.jinja`, then restart the
+server to reload the template. (Same class of fix as the DFlash2-fork template patch
+for the 27B lane.)
+
+**Also note:** the template accepts `reasoning_effort` ∈ {xhigh (default), medium, low}
+and 400s on anything else (e.g. `high`). Match client settings.
+
+---
+
+## D9 — first boot after a reboot: worker spawn dies rebuilding semaphores
+
+**Symptom:** several consecutive service starts fail in the first ~7 minutes after a
+reboot. The engine reports `WorkerProc initialization failed due to an exception in a
+background process`, and the worker traceback ends in:
+
+```
+File ".../multiprocessing/synchronize.py", line 115, in __setstate__
+    self._semlock = _multiprocessing.SemLock._rebuild(*state)
+FileNotFoundError: [Errno 2] No such file or directory
+```
+
+**Cause class:** a semaphore-availability race during early boot — the `/dev/shm`
+semaphores a spawned worker must rebuild are gone by the time it starts. (Exact culprit
+not isolated; it matches the logind session/IPC-teardown class, disappears once the
+system has been up ~8 minutes, and login-session runs are unaffected. Retries inside the
+window keep failing; the service crash-loops until past it.)
+
+**Mitigations (all in this repo / its docs):**
+1. Boot gate in `scripts/run.sh` — waits until uptime ≥ `BOOT_GATE_SECONDS` (480 s) AND
+   a CUDA probe passes on the target devices (mid-day restarts skip it instantly).
+2. `loginctl enable-linger <service-user>`.
+3. `RemoveIPC=no` in `/etc/systemd/logind.conf`.
+
+With these, two full reboot drills passed (first gated boot, `restarts=0`, smoke OK).
+
+---
+
 If you hit a drift we haven't listed, the most reliable debugging move is: diff the
 applied file against `bluespace3/qwen38-flash-next-170hx`'s `patches/ple_layer.patched.py`
 (their reference), and treat "reference has it, applied doesn't" as a missing hunk.

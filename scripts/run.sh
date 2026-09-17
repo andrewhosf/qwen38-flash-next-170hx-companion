@@ -41,6 +41,23 @@ export VLLM_ENGINE_READY_TIMEOUT_S=5400
 
 mkdir -p "$TRITON_CACHE_DIR" "$VLLM_CACHE_ROOT"
 
+# Boot-window gate (2026-09-16): for ~7 minutes after a reboot, freshly-spawned worker
+# processes can die rebuilding POSIX semaphores (SemLock._rebuild -> FileNotFoundError in
+# /dev/shm) — observed 5x in the reboot drill; a start after the window succeeds cleanly.
+# Wait until past the window AND a real CUDA context probe passes on the target devices.
+# Mid-day restarts (uptime already past the gate) skip instantly.
+if [ "${SKIP_BOOT_GATE:-0}" != "1" ] && [ "$(cut -d. -f1 /proc/uptime)" -lt "${BOOT_GATE_SECONDS:-480}" ]; then
+  for _i in $(seq 1 90); do
+    if [ "$(cut -d. -f1 /proc/uptime)" -ge "${BOOT_GATE_SECONDS:-480}" ] && \
+       "$VENV/python" -c "import torch; [torch.zeros(8, device=f'cuda:{i}') for i in range(torch.cuda.device_count())]" >/dev/null 2>&1; then
+      echo "flashnext: boot gate passed (uptime $(cut -d. -f1 /proc/uptime)s)"
+      break
+    fi
+    echo "flashnext: boot gate waiting (uptime $(cut -d. -f1 /proc/uptime)s, target ${BOOT_GATE_SECONDS:-480}s)"
+    sleep 10
+  done
+fi
+
 ARGS=(serve "$MODEL"
   --served-model-name $SERVED_NAMES
   --host "${HOST:-0.0.0.0}" --port "$PORT"

@@ -27,6 +27,8 @@ dead-reproducible install path, so the next person doesn't have to rediscover th
 - Upstream vLLM (0.29.0) **hard-blocks PP>1** for Qwen4Exp PLE (`NotImplementedError: ... pipeline_parallel_size=1 ...`). The original repo's PP=2 + MTP works only with three PP patches that were **never published**.
 - Therefore: run the original repo's **`tp` mode** (TP=2). This companion ships a working `tp` config; PP remains future work unless those patches surface.
 - Checkpoint: use `albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE` at the pinned revision — same composition as the (now unfindable) ModelScope `W4A16-fp8ple` export. Verify with `scripts/verify_checkpoint_ple.py` before committing to the download.
+- Client compatibility: patch the chat template to merge multi-system payloads (`scripts/patch_chat_template.py`); `reasoning_effort` accepts `xhigh`/`medium`/`low` only.
+- Reboot-safe: boot gate + `linger`/`RemoveIPC=no` (see `docs/drift-log.md` D9); optional NVMe tier shaves the PLE prewarm **100 s → 30 s** (`docs/deployment.md` §8). Two reboot drills passed.
 - Four fixes needed for vLLM 0.29.0 (all in `install/`):
   1. rename + re-register the PLE ngram-id op path (`compute_ngram_ids` → `_hash_ngram_ids`, drop the stale op registration);
   2. add `vllm::qwen4_exp_ple_mmap_forward` to the default splitting-ops list;
