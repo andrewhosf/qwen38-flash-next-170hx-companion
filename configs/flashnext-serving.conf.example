@@ -1,0 +1,23 @@
+# /etc/flashnext-serving.conf — Flash-Next lane example config.
+# Edit paths + DEVICES for your box. MODE=tp is the working profile on vLLM 0.29.0
+# (PP>1 is blocked upstream for Qwen4Exp PLE — see docs/drift-log.md § D6).
+MODE=tp
+MODEL=/data/models/Qwen3.8-Flash-Next-W4A16-FP8PLE
+MTP=/data/models/Qwen3.8-Flash-Next-W4A16-FP8PLE/runtime/mtp-int4-g32
+# With CUDA_DEVICE_ORDER=PCI_BUS_ID, list your two CMP 170HX device indices here.
+DEVICES=0,1
+SERVED_NAMES="qwen3.8-flash-next"
+PORT=8000
+# First-light profile: native 262K ctx, BF16 KV (QSA requires; fp8 KV is blocked).
+MAX_LEN=262144
+MAX_SEQS=8
+GPU_UTIL=0.90
+# Speculative decoding: 0 = off. Set 4 to enable MTP via the draft above (unvalidated in
+# this companion; 4 is the QSA ring-buffer cap).
+SPEC_TOKENS=0
+# Expert parallel is off (the original repo's tp mode ran plain TP=2).
+EP=0
+ALLOW_LONG=1
+# Set YARN=1 to apply the YaRN f4 overrides (for >262K context experiments).
+YARN=0
+YARN_OVERRIDES='{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'

@@ -1,0 +1,21 @@
+NOTICE
+
+This repository contains material derived from the following projects:
+
+1. bluespace3/qwen38-flash-next-170hx (Apache License 2.0)
+   - patches/bluespace-original/ple_mmap.py
+   - patches/bluespace-original/0001-ple-layer-mmap-hook.patch
+   - patches/bluespace-original/0002-envs-ple-knobs.patch
+   - The launcher pattern and benchmark methodology referenced in docs/.
+   Original copyright: the bluespace3/qwen38-flash-next-170hx authors.
+   A copy of the Apache-2.0 license is in LICENSES/bluespace-LICENSE.
+
+2. vLLM (Apache License 2.0) — the install scripts modify files from an installed
+   vLLM 0.29.0 distribution. No vLLM source is redistributed here.
+
+3. Model composition documentation refers to work by:
+   - Intel (auto-round W4A16 quantization)
+   - RadixArk (FP8 PLE table)
+   - albucino (assembled W4A16-FP8PLE checkpoint on Hugging Face)
+   - Qwen (base model; Qwen Community License)
+   No model weights are redistributed in this repository.

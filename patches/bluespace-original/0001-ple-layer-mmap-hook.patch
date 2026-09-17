@@ -1,0 +1,409 @@
+--- a/vllm/models/qwen4_exp/nvidia/ple_layer.py
++++ b/vllm/models/qwen4_exp/nvidia/ple_layer.py
+@@ -44,7 +49,62 @@
+ )
+ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+ 
+-from ..common.ple import PLEVocabParallelEmbedding
++from ..common.ple import copy_ple_embedding_shard_
++from . import ple_mmap
++
++_MASK64 = (1 << 64) - 1
++_SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
++_SPLITMIX_M1 = 0xBF58476D1CE4E5B9
++_SPLITMIX_M2 = 0x94D049BB133111EB
++_PLE_LAYER_PRIME = 10007
++
++
++def _splitmix64(value: int) -> int:
++    value = (value + _SPLITMIX_GAMMA) & _MASK64
++    value = ((value ^ (value >> 30)) * _SPLITMIX_M1) & _MASK64
++    value = ((value ^ (value >> 27)) * _SPLITMIX_M2) & _MASK64
++    return (value ^ (value >> 31)) & _MASK64
++
++
++def _is_prime_64(value: int) -> bool:
++    if value < 2:
++        return False
++    for prime in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
++        if value % prime == 0:
++            return value == prime
++    exponent = value - 1
++    shifts = 0
++    while exponent % 2 == 0:
++        exponent //= 2
++        shifts += 1
++    for base in (2, 325, 9375, 28178, 450775, 9780504, 1795265022):
++        if base % value == 0:
++            continue
++        witness = pow(base, exponent, value)
++        if witness in (1, value - 1):
++            continue
++        for _ in range(shifts - 1):
++            witness = pow(witness, 2, value)
++            if witness == value - 1:
++                break
++        else:
++            return False
++    return True
++
++
++def _nth_prime_after(start: int, count: int) -> int:
++    prime = int(start)
++    for _ in range(count):
++        candidate = prime + 1
++        if candidate <= 2:
++            prime = 2
++            continue
++        if candidate % 2 == 0:
++            candidate += 1
++        while not _is_prime_64(candidate):
++            candidate += 2
++        prime = candidate
++    return prime
+ 
+ 
+ class Qwen4ExpPLEGroupedNorm(nn.Module):
+@@ -129,6 +189,11 @@
+     """Select global-scale FP8 only for quantized PLE checkpoint shards."""
+ 
+     if not isinstance(quant_config, Fp8Config):
++        # Escape hatch: W4A16 checkpoint with separately FP8-serialized PLE
++        # shards (auto-round main weights + fp8 ngram table). Enabled only
++        # via env to keep stock auto-round behavior untouched.
++        if os.environ.get("VLLM_PLE_FORCE_FP8") == "1":
++            return Qwen4ExpPLEFp8EmbeddingMethod()
+         return None
+     if not quant_config.is_checkpoint_fp8_serialized:
+         return None
+@@ -149,102 +214,6 @@
+ 
+ 
+ class Qwen4ExpNGramEmbedding(nn.Module):
+-    _MASK64 = (1 << 64) - 1
+-    _SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
+-    _SPLITMIX_M1 = 0xBF58476D1CE4E5B9
+-    _SPLITMIX_M2 = 0x94D049BB133111EB
+-    _PLE_LAYER_PRIME = 10007
+-
+-    @classmethod
+-    def _splitmix64(cls, value: int) -> int:
+-        """Mix an integer into a deterministic unsigned 64-bit value."""
+-        value = (value + cls._SPLITMIX_GAMMA) & cls._MASK64
+-        value = ((value ^ (value >> 30)) * cls._SPLITMIX_M1) & cls._MASK64
+-        value = ((value ^ (value >> 27)) * cls._SPLITMIX_M2) & cls._MASK64
+-        return (value ^ (value >> 31)) & cls._MASK64
+-
+-    @staticmethod
+-    def _is_prime_64(value: int) -> bool:
+-        """Return whether a 64-bit integer is prime."""
+-        if value < 2:
+-            return False
+-        for prime in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
+-            if value % prime == 0:
+-                return value == prime
+-        exponent = value - 1
+-        shifts = 0
+-        while exponent % 2 == 0:
+-            exponent //= 2
+-            shifts += 1
+-        for base in (2, 325, 9375, 28178, 450775, 9780504, 1795265022):
+-            if base % value == 0:
+-                continue
+-            witness = pow(base, exponent, value)
+-            if witness in (1, value - 1):
+-                continue
+-            for _ in range(shifts - 1):
+-                witness = pow(witness, 2, value)
+-                if witness == value - 1:
+-                    break
+-            else:
+-                return False
+-        return True
+-
+-    @classmethod
+-    def _nth_prime_after(cls, start: int, count: int) -> int:
+-        """Return the ``count``-th prime strictly greater than ``start``."""
+-        prime = int(start)
+-        for _ in range(count):
+-            candidate = prime + 1
+-            if candidate <= 2:
+-                prime = 2
+-                continue
+-            if candidate % 2 == 0:
+-                candidate += 1
+-            while not cls._is_prime_64(candidate):
+-                candidate += 2
+-            prime = candidate
+-        return prime
+-
+-    @classmethod
+-    def _make_layer_multipliers(
+-        cls,
+-        *,
+-        ngram_size: int,
+-        unigram_vocab_size: int,
+-        seed: int,
+-        ple_dense_layer_id: int,
+-    ) -> list[int]:
+-        """Build deterministic hash multipliers for one PLE layer."""
+-        max_multiplier = ((1 << 63) - 1) // unigram_vocab_size
+-        half_bound = max(1, max_multiplier // 2)
+-        base_seed = seed + cls._PLE_LAYER_PRIME * ple_dense_layer_id
+-        multipliers = []
+-        for index in range(ngram_size):
+-            value = base_seed + cls._SPLITMIX_GAMMA * (index + 1)
+-            multipliers.append(2 * (cls._splitmix64(value) % half_bound) + 1)
+-        return multipliers
+-
+-    @classmethod
+-    def _make_vocab_layout(
+-        cls,
+-        *,
+-        ngram_vocab_size_base: int,
+-        ngram_heads: int,
+-        ple_dense_layer_id: int,
+-    ) -> tuple[list[int], list[int], int]:
+-        """Build per-head vocabulary sizes, offsets, and total row count."""
+-        sizes: list[int] = []
+-        offsets: list[int] = []
+-        offset = 0
+-        for local_head in range(ngram_heads):
+-            global_head = ple_dense_layer_id * ngram_heads + local_head
+-            size = cls._nth_prime_after(ngram_vocab_size_base - 1, global_head + 1)
+-            sizes.append(size)
+-            offsets.append(offset)
+-            offset += size
+-        return sizes, offsets, offset
+-
+     def __init__(
+         self,
+         config: Qwen4ExpTextConfig,
+@@ -279,23 +248,30 @@
+         if self.split_ngram_parts <= 0:
+             raise ValueError("split_ngram_parts must be positive")
+ 
+-        multipliers = self._make_layer_multipliers(
+-            ngram_size=self.ngram_size,
+-            unigram_vocab_size=self.unigram_vocab_size,
+-            seed=int(getattr(config, "seed", 1234)),
+-            ple_dense_layer_id=ple_dense_layer_id,
+-        )
++        max_multiplier = ((1 << 63) - 1) // self.unigram_vocab_size
++        half_bound = max(1, max_multiplier // 2)
++        seed = int(getattr(config, "seed", 1234))
++        base_seed = seed + _PLE_LAYER_PRIME * ple_dense_layer_id
++        multipliers = []
++        for index in range(self.ngram_size):
++            value = base_seed + _SPLITMIX_GAMMA * (index + 1)
++            multipliers.append(2 * (_splitmix64(value) % half_bound) + 1)
+         self.register_buffer(
+             "layer_multipliers",
+             torch.tensor(multipliers, dtype=torch.long),
+             persistent=True,
+         )
+ 
+-        sizes, offsets, total_vocab_size = self._make_vocab_layout(
+-            ngram_vocab_size_base=int(config.ngram_vocab_size_base),
+-            ngram_heads=self.ngram_heads,
+-            ple_dense_layer_id=ple_dense_layer_id,
+-        )
++        ngram_vocab_size_base = int(config.ngram_vocab_size_base)
++        sizes: list[int] = []
++        offsets: list[int] = []
++        offset = 0
++        for local_head in range(self.ngram_heads):
++            global_head = ple_dense_layer_id * self.ngram_heads + local_head
++            size = _nth_prime_after(ngram_vocab_size_base - 1, global_head + 1)
++            sizes.append(size)
++            offsets.append(offset)
++            offset += size
+         self.register_buffer(
+             "ngram_heads_vocab_sizes",
+             torch.tensor(sizes, dtype=torch.long),
+@@ -307,17 +283,28 @@
+             persistent=True,
+         )
+         divisor = int(config.make_ngram_vocab_size_divisible_by)
+-        padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
+-        self.ngram_embedding = PLEVocabParallelEmbedding(
+-            padded_vocab_size,
+-            self.head_dim,
+-            params_dtype=params_dtype,
+-            padding_size=divisor,
+-            prefix=f"{prefix}.ngram_embedding",
+-            quant_method=_get_ple_embedding_quant_method(
+-                quant_config, f"{prefix}.ngram_embedding"
+-            ),
+-        )
++        padded_vocab_size = ((offset + divisor - 1) // divisor) * divisor
++        self.ngram_embedding: VocabParallelEmbedding | ple_mmap.MmapNgramEmbedding
++        if ple_mmap.enabled():
++            vllm_config = get_current_vllm_config()
++            ple_mmap.check_cudagraph_safety(vllm_config.compilation_config)
++            ple_mmap.validate_shards_for(
++                vllm_config.model_config, layer_name, self.head_dim
++            )
++            self.ngram_embedding = ple_mmap.MmapNgramEmbedding(
++                padded_vocab_size, self.head_dim
++            )
++        else:
++            self.ngram_embedding = VocabParallelEmbedding(
++                padded_vocab_size,
++                self.head_dim,
++                params_dtype=params_dtype,
++                padding_size=divisor,
++                prefix=f"{prefix}.ngram_embedding",
++                quant_method=_get_ple_embedding_quant_method(
++                    quant_config, f"{prefix}.ngram_embedding"
++                ),
++            )
+         self.register_buffer(
+             "positions_buffer",
+             torch.arange(max_total_tokens, dtype=torch.int64),
+@@ -440,19 +431,26 @@
+         query_start_loc: torch.Tensor,
+         ngram_context: torch.Tensor,
+     ) -> torch.Tensor:
+-        ngram_ids = input_ids.new_empty(
+-            (input_ids.shape[0], self.ngram_heads),
+-            dtype=torch.long,
+-        )
+-        # Keep num_reqs-dependent ID generation outside PIECEWISE CUDA graphs,
+-        # which dispatch only on the padded token count.
+-        torch.ops.vllm.qwen4_exp_compute_ple_ngram_ids(
+-            input_ids,
+-            query_start_loc,
+-            ngram_context,
+-            ngram_ids,
+-            self.layer_name,
+-        )
++        if isinstance(self.ngram_embedding, ple_mmap.MmapNgramEmbedding):
++            # The stock hashing above specializes vLLM's
++            # dynamic dims (Python ints from .numel()-derived slicing) when
++            # traced under torch.compile — ConstraintViolationError on
++            # query_start_loc.size()[0]. Widen the op boundary to the WHOLE
++            # forward (hashing runs eagerly, untraced, inside the op)
++            # rather than just the gather. The allocation below is still
++            # traced code; new_empty with a symbolic dim is fine — it is
++            # the .numel()-to-int SLICING inside _hash_ngram_ids that
++            # specialized, so num_tokens here must stay symbolic (no int()).
++            num_tokens = input_ids.reshape(-1).shape[0]
++            output = input_ids.new_empty(
++                (num_tokens, self.embedding_dim),
++                dtype=self.ngram_embedding.torch_dtype,
++            )
++            torch.ops.vllm.qwen4_exp_ple_mmap_forward(
++                input_ids, query_start_loc, ngram_context, output, self.layer_name
++            )
++            return output
++        ngram_ids = self._hash_ngram_ids(input_ids, query_start_loc, ngram_context)
+         return self.ngram_embedding(ngram_ids).flatten(-2)
+ 
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+@@ -481,6 +480,20 @@
+                 buffer.copy_(loaded_weight.to(device=buffer.device, dtype=buffer.dtype))
+                 loaded.add(name)
+                 continue
++            if (
++                isinstance(embedding, ple_mmap.MmapNgramEmbedding)
++                and name == "ngram_embedding.weight_scale"
++            ):
++                # The placeholder has no registered weight_scale Parameter for
++                # AutoWeightsLoader to find generically; register it directly,
++                # on whatever device the module's other buffers already live.
++                ple_mmap.set_weight_scale(
++                    embedding,
++                    loaded_weight,
++                    cast(torch.Tensor, self.layer_multipliers).device,
++                )
++                loaded.add(name)
++                continue
+             if name.startswith(shard_prefix) and name.endswith(".weight"):
+                 shard_text = name[len(shard_prefix) : -len(".weight")]
+                 if not shard_text.isdigit():
+@@ -492,7 +505,6 @@
+                         f"PLE embedding shard index {shard_index} exceeds "
+                         f"split_ngram_parts={self.split_ngram_parts}"
+                     )
+-                embedding = self.ngram_embedding
+                 shard_size = (
+                     embedding.org_vocab_size + self.split_ngram_parts - 1
+                 ) // self.split_ngram_parts
+@@ -508,10 +520,29 @@
+                         f"expected {expected_shape}, got "
+                         f"{tuple(loaded_weight.shape)}"
+                     )
+-                embedding.weight.weight_loader(
+-                    embedding.weight,
++                if isinstance(embedding, ple_mmap.MmapNgramEmbedding):
++                    # Served from disk via mmap; the loader still streams
++                    # this shard transiently, but it is never retained.
++                    # weights_streamed distinguishes this real (non-dummy)
++                    # load from a --load-format dummy probe that never
++                    # calls load_weights at all — build_tables must attach
++                    # a real table before any forward, or the placeholder
++                    # raises instead of silently serving fp8 zeros.
++                    embedding.weights_streamed = True
++                    loaded.add("ngram_embedding.weight")
++                    continue
++                # The stock path below reads .weight/.shard_indices, which
++                # only the real VocabParallelEmbedding provides (never
++                # reached when mmap-enabled, per the isinstance branch
++                # above); cast rather than assert so duck-typed test
++                # doubles still work.
++                stock_embedding = cast(VocabParallelEmbedding, embedding)
++                copy_ple_embedding_shard_(
++                    cast(torch.Tensor, stock_embedding.weight).data,
+                     loaded_weight,
+                     checkpoint_start=checkpoint_start,
++                    tp_start=stock_embedding.shard_indices.org_vocab_start_index,
++                    tp_end=stock_embedding.shard_indices.org_vocab_end_index,
+                 )
+                 loaded.add("ngram_embedding.weight")
+                 continue
+@@ -616,7 +647,9 @@
+         """Dequantize PLE lookup output."""
+ 
+         if not is_fp8(embeddings):
+-            return embeddings
++            # Unquantized (e.g. BF16) tables carry no scale to apply — just
++            # cast to the output dtype, same as the fp8 branch's final cast.
++            return embeddings.to(output_dtype)
+         weight_scale = self._get_embedding_weight_scale()
+         if weight_scale is None:
+             raise RuntimeError("FP8 PLE embedding is missing its global scale")
+@@ -1188,33 +1222,6 @@
+         return gated_value.flatten(-2) + conv_output
+ 
+ 
+-def qwen4_exp_compute_ple_ngram_ids(
+-    input_ids: torch.Tensor,
+-    query_start_loc: torch.Tensor,
+-    ngram_context: torch.Tensor,
+-    output: torch.Tensor,
+-    layer_name: str,
+-) -> None:
+-    """Compute request-dependent PLE n-gram IDs outside piecewise graphs."""
+-    layer = get_forward_context().no_compile_layers[layer_name]
+-    ngram_ids = layer.ple_embedding.compute_ngram_ids(
+-        input_ids,
+-        query_start_loc,
+-        ngram_context,
+-    )
+-    output.copy_(ngram_ids)
+-
+-
+-def qwen4_exp_compute_ple_ngram_ids_fake(
+-    input_ids: torch.Tensor,
+-    query_start_loc: torch.Tensor,
+-    ngram_context: torch.Tensor,
+-    output: torch.Tensor,
+-    layer_name: str,
+-) -> None:
+-    return
+-
+-
+ def qwen4_exp_ple_short_conv(
+     inputs: torch.Tensor,
+     output: torch.Tensor,

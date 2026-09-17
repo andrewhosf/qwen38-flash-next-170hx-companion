@@ -1,0 +1,27 @@
+[Unit]
+Description=Qwen3.8-Flash-Next 176B serving (vLLM + PLE mmap, TP=2 on 2x CMP 170HX)
+# Documentation=file:///opt/flashnext/README.md
+After=network-online.target
+Wants=network-online.target
+# The GPUs are exclusively owned by whichever lane is active — list other GPU-owning
+# units here so systemd keeps them mutually exclusive:
+# Conflicts=other-lane.service
+
+[Service]
+Type=simple
+User=flashnext
+Group=flashnext
+Environment=FIN_CONF=/etc/flashnext-serving.conf
+ExecStart=/opt/flashnext/run.sh
+Restart=always
+RestartSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=120
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+# Give the cards time to release VRAM between restarts.
+ExecStartPre=/bin/sleep 5
+
+[Install]
+WantedBy=multi-user.target
